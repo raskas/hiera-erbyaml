@@ -78,6 +78,11 @@ class Hiera
 
       def erb_parsing(scope, question)
         if scope.class == Puppet::DataBinding::Variables
+          class << scope
+            def get_scope
+              @variable_bindings
+            end
+          end
           scope = scope.get_scope
         end
 
