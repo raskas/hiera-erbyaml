@@ -1,11 +1,11 @@
 class Hiera
   module Backend
     class Erbyaml_backend
-      def initialize
+      def initialize(cache=nil)
         require 'yaml'
         Hiera.debug("Hiera ERB YAML backend starting")
-        @data  = Hash.new
-        @cache = Hash.new
+
+        @cache = cache || Filecache.new
       end
 
       def lookup(key, scope, order_override, resolution_type)
@@ -17,20 +17,14 @@ class Hiera
           Hiera.debug("Looking for data source #{source}")
           yamlfile = Backend.datafile(:yaml, scope, source, "yaml") || next
 
-          # If you call stale? BEFORE you do encounter the YAML.load_file line
-          # it will populate the @cache variable and return true. The second
-          # time you call it, it will return false because @cache has been
-          # populated. Because of this there are two conditions to check:
-          # is @data[yamlfile] populated AND is the cache stale.
-          if @data[yamlfile]
-            @data[yamlfile] = YAML.load_file(yamlfile) if stale?(yamlfile)
-          else
-            @data[yamlfile] = YAML.load_file(yamlfile)
+          next unless File.exist?(yamlfile)
+
+          data = @cache.read(yamlfile, Hash, {}) do |data|
+            YAML.load(data)
           end
 
-          next if ! @data[yamlfile]
-          next if @data[yamlfile].empty?
-          next unless @data[yamlfile].include?(key)
+          next if data.empty?
+          next unless data.include?(key)
 
           # Extra logging that we found the key. This can be outputted
           # multiple times if the resolution type is array or hash but that
@@ -43,7 +37,7 @@ class Hiera
           # the array
           #
           # for priority searches we break after the first found data item
-          new_answer = Backend.parse_answer(@data[yamlfile][key], scope)
+          new_answer = Backend.parse_answer(data[key], scope)
           case resolution_type
           when :array
             raise Exception, "Hiera type mismatch: expected Array and got #{new_answer.class}" unless new_answer.kind_of? Array or new_answer.kind_of? String
@@ -52,7 +46,7 @@ class Hiera
           when :hash
             raise Exception, "Hiera type mismatch: expected Hash and got #{new_answer.class}" unless new_answer.kind_of? Hash
             answer ||= {}
-            answer = new_answer.merge answer
+            answer = Backend.merge_answer(new_answer,answer)
           else
             answer = new_answer
             break
@@ -84,22 +78,35 @@ class Hiera
             end
           end
           scope = scope.get_scope
+        elsif scope.class.to_s == 'Hiera::Scope'
+          class << scope
+            def get_scope
+              @real
+            end
+          end
+          scope = scope.get_scope
         end
 
         if not question.nil?
-          wrapper = Puppet::Parser::TemplateWrapper.new(scope)
           case question
           when Array
             answer = question.collect { |x| x = erb_parsing(scope, x)  }
           when Hash
             answer = question.inject({}) { |h, (k, v)| h[k] = erb_parsing(scope, v); h }
-          else
-            begin
-              answer = wrapper.result("#{question}")
-            rescue => detail
-              raise Puppet::ParseError,
-                "Failed to parse inline template (#{question}): #{detail}"
+          when String 
+            if ! question.include?('<%')
+              answer = question
+            else
+              begin
+                wrapper = Puppet::Parser::TemplateWrapper.new(scope)
+                answer = wrapper.result("#{question}")
+              rescue => detail
+                raise Puppet::ParseError,
+                  "Failed to parse inline template (#{question}): #{detail}"
+              end
             end
+          else
+            answer = question.to_s
           end
           return answer
         end
